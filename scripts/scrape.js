@@ -25,8 +25,8 @@ function httpGet(url, acceptJSON) {
         else ok(acceptJSON ? JSON.parse(d) : d);
       });
     });
-    req.on('error', fail);
-    req.setTimeout(20000, () => { req.destroy(); fail(new Error('timeout')); });
+    req.on('error', err => fail(err));
+    req.setTimeout(45000, function() { this.destroy(); });
   });
 }
 
@@ -155,4 +155,9 @@ async function main() {
   console.log('Done: ' + progs.length + ' eps, ' + (rss.length/1024).toFixed(0) + 'KB');
 }
 
-main().catch(e => { console.error('FAIL:', e && (e.message || e.stack || String(e)) || 'unknown'); process.exit(1); });
+main().catch(e => {
+  if (e && e.errors) console.error('FAIL: Aggregate', e.errors.map(x => x.message || x.code || String(x)).join(', '));
+  else if (e && e.code) console.error('FAIL:', e.code, e.message || '');
+  else console.error('FAIL:', e && (e.message || e.stack || String(e)) || 'unknown');
+  process.exit(1);
+});
