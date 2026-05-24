@@ -1,4 +1,4 @@
-// Qtfm Podcast Scraper v3 - 用curl绕过runner网络问题
+// Qtfm Podcast Scraper v4 - 全量抓取（走代理，不抓音频URL）
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -7,36 +7,26 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 if (!CHANNEL_ID) { console.error('CHANNEL_ID required'); process.exit(1); }
 const WORKER_BASE = process.env.WORKER_BASE || 'https://qtfm-podcast.general74110.workers.dev';
 const OUT_DIR = process.env.OUT_DIR || 'novels';
-
 const UA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36';
 
-function curl(url, acceptJSON) {
-  const ua = acceptJSON
-    ? '"User-Agent: ' + UA + '" -H "Accept: application/json" -H "Origin: https://m.qtfm.cn" -H "Referer: https://m.qtfm.cn/"'
-    : '"User-Agent: ' + UA + '" -H "Accept: text/html,application/xhtml+xml" -H "Referer: https://m.qtfm.cn/"';
-  const cmd = 'curl -sL --connect-timeout 30 --max-time 60 -H ' + ua + ' ' + JSON.stringify(url);
-  return execSync(cmd, { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'] });
+function curl(url) {
+  const cmd = 'curl -sL --connect-timeout 15 --max-time 30 -H "User-Agent: ' + UA + '" -H "Accept: text/html,application/xhtml+xml" -H "Referer: https://m.qtfm.cn/" ' + JSON.stringify(url);
+  return execSync(cmd, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] });
+}
+function curlJSON(url) {
+  const cmd = 'curl -sL --connect-timeout 15 --max-time 30 -H "User-Agent: ' + UA + '" -H "Accept: application/json" -H "Origin: https://m.qtfm.cn" -H "Referer: https://m.qtfm.cn/" ' + JSON.stringify(url);
+  return JSON.parse(execSync(cmd, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }));
 }
 
-function httpGet(url, acceptJSON, retries) {
-  retries = retries || 5;
-  const errors = [];
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const result = curl(url, acceptJSON);
-      if (!result && result !== '') throw new Error('empty response');
-      if (acceptJSON) return JSON.parse(result);
-      return result;
-    } catch(e) {
-      errors.push(e.message);
-      if (attempt < retries) {
-        const wait = 3000 * attempt;
-        console.log('  [' + attempt + '/' + retries + '] retrying ' + url.slice(0,60) + '...');
-        execSync('sleep ' + (wait/1000));
-      }
-    }
+function httpGet(url, retries) {
+  for (let a = 1; a <= (retries||3); a++) {
+    try { return curl(url); } catch(e) { if (a < (retries||3)) execSync('sleep ' + (a*2)); else throw e; }
   }
-  throw new Error(errors.join(' | '));
+}
+function httpGetJSON(url, retries) {
+  for (let a = 1; a <= (retries||3); a++) {
+    try { return curlJSON(url); } catch(e) { if (a < (retries||3)) execSync('sleep ' + (a*2)); else throw e; }
+  }
 }
 
 function extractInitStores(html) {
@@ -62,164 +52,136 @@ function fmtDur(s) {
   return h > 0 ? h + ':' + String(m).padStart(2,'0') + ':' + String(s2).padStart(2,'0')
     : m + ':' + String(s2).padStart(2,'0');
 }
-
 function esc(s) {
   if (!s) return '';
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 async function main() {
-  console.log('[' + CHANNEL_ID + '] Starting with curl...');
   const startTime = Date.now();
+  console.log('[' + CHANNEL_ID + '] Starting...');
 
-  let html = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/');
+  // 1. 获取频道元数据 + 前30集
+  const html = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/');
   let data = extractInitStores(html);
-
-  // 如果频道SSR数据为空，尝试从SEO或搜索找实际频道
+  
   let ch, ver, title, desc, cover;
   if (data?.VChannelStore?.channel?.id) {
     ch = data.VChannelStore.channel;
     ver = ch.v || '';
-    title = ch.title || 'Unknown';
+    title = ch.title || '';
     desc = (ch.description || title).replace(/<[^>]+>/g, '').trim();
     cover = ch.cover ? ch.cover + '!400' : '';
     console.log('Title: ' + title + ', Total: ' + (ch.program_count || 0));
   } else {
-    // SSR空数据：从SEO获取标题
+    // SSR 为空，从SEO获取
     const seo = data?.VChannelStore?.seo || [];
     const seoTitle = seo.find(s => s.elementType === 'title')?.innerText || '';
-    const seoDesc = seo.find(s => s.elementType === 'meta' && s.name === 'description')?.content || '';
     title = seoTitle.replace(/\s*有声小说在线收听.*$/, '') || 'Channel ' + CHANNEL_ID;
-    desc = seoDesc.slice(0, 200) || title;
-    cover = '';
-    console.log('SSR empty for ' + CHANNEL_ID + ', SEO title: ' + title);
-
-    // 通过搜索找实际内容频道
-    const keyword = encodeURIComponent(title.replace(/\s*\(.*?\)\s*/, '').trim());
+    desc = seo.find(s => s.elementType === 'meta' && s.name === 'description')?.content?.slice(0,200) || title;
+    console.log('SSR empty, SEO title: ' + title);
+    // 搜索替代频道
+    const kw = encodeURIComponent(title.replace(/\s*\(.*?\)\s*/, '').trim());
     try {
-      const search = await httpGet('https://webapi.qtfm.cn/api/mobile/search/keyword/' + keyword + '?page=1&pageSize=10', true);
-      const channels = search?.channels?.data || [];
-      // 找节目数最多（最匹配）的频道
-      const best = channels.sort((a,b) => (b.program_count||0) - (a.program_count||0))[0];
-      if (best && best.id && best.program_count > 0) {
-        console.log('Found real channel: ' + best.id + ' (' + best.title + ', ' + best.program_count + ' eps)');
-        // 重新用正确的频道ID获取
-        const realHtml = await httpGet('https://m.qtfm.cn/vchannels/' + best.id + '/');
-        const realData = extractInitStores(realHtml);
-        if (realData?.VChannelStore?.channel?.id) {
-          ch = realData.VChannelStore.channel;
+      const sr = await httpGetJSON('https://webapi.qtfm.cn/api/mobile/search/keyword/' + kw + '?page=1&pageSize=5');
+      const channels = sr?.channels?.data || [];
+      const best = channels.sort((a,b) => (b.program_count||0)-(a.program_count||0))[0];
+      if (best?.id) {
+        const h2 = await httpGet('https://m.qtfm.cn/vchannels/' + best.id + '/');
+        const d2 = extractInitStores(h2);
+        if (d2?.VChannelStore?.channel?.id) {
+          ch = d2.VChannelStore.channel;
           ver = ch.v || '';
-          title = ch.title || best.title || title;
+          title = ch.title || title;
           desc = (ch.description || title).replace(/<[^>]+>/g, '').trim();
           cover = ch.cover ? ch.cover + '!400' : '';
-          console.log('Using channel ' + best.id + ': ' + title + ', ' + (ch.program_count || 0) + ' eps');
-        } else {
-          throw new Error('Real channel also has empty SSR: ' + best.id);
+          console.log('Using channel ' + best.id + ': ' + title + ', ' + (ch.program_count||0) + ' eps');
         }
-      } else {
-        throw new Error('No content channel found for ' + CHANNEL_ID);
       }
-    } catch(e) {
-      throw new Error('Cannot find channel content: ' + e.message);
-    }
+    } catch(e) { console.log('Search failed:', e.message); }
+    if (!ch) throw new Error('Cannot find channel content');
   }
 
+  // 2. 获取所有节目（API第一页 + nextProgramId链遍历）
   let allProgs = [];
   const seenIds = new Set();
 
   let batch = [];
   if (ver) {
     try {
-      const api = await httpGet('https://webapi.qtfm.cn/api/mobile/channels/' + CHANNEL_ID + '/programs?version=' + ver, true);
+      const api = await httpGetJSON('https://webapi.qtfm.cn/api/mobile/channels/' + CHANNEL_ID + '/programs?version=' + ver);
       if (api.programs) batch = api.programs;
-    } catch(e) { console.log('API fail:', e.message); }
+    } catch(e) {}
   }
-  if (batch.length === 0) batch = data.VChannelStore.programs?.items || [];
+  if (batch.length === 0) batch = data?.VChannelStore?.programs?.items || [];
   console.log('Initial: ' + batch.length + ' eps');
 
   for (const p of batch) {
     if (!seenIds.has(p.programId)) {
       seenIds.add(p.programId);
-      allProgs.push({ programId: p.programId, title: p.title, duration: p.duration, updateTime: p.updateTime });
+      allProgs.push(p);
     }
   }
 
-  // Walk nextProgramId chain
-  let lastId = batch.length > 0 ? batch[batch.length - 1].programId : null;
+  // 顺着 nextProgramId 链遍历
+  let lastId = allProgs.length > 0 ? allProgs[allProgs.length - 1].programId : null;
   let walked = 0;
-
+  
   while (lastId && walked < 20000) {
     try {
       const h2 = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + lastId + '/');
       const pd = extractInitStores(h2);
       if (!pd?.ProgramStore?.programInfo) break;
-      const nextId = pd.ProgramStore.programInfo.nextProgramId;
+      
+      const pi = pd.ProgramStore.programInfo;
+      const nextId = pi.nextProgramId;
       if (!nextId || seenIds.has(nextId)) break;
 
-      const h3 = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + nextId + '/');
-      const pd2 = extractInitStores(h3);
-      if (pd2?.ProgramStore?.programInfo) {
-        const pi = pd2.ProgramStore.programInfo;
-        seenIds.add(nextId);
-        allProgs.push({ programId: nextId, title: pi.title || '', duration: pi.duration || 0, updateTime: pi.updateTime || null });
-        lastId = nextId;
-        walked++;
-      } else break;
-
-      const sibs = pd2?.ProgramStore?.siblingPrograms || [];
+      // 把新节目加入（从siblingPrograms里批量获取信息）
+      const sibs = pd.ProgramStore.siblingPrograms || [];
+      let added = 0;
       for (const sp of sibs) {
         if (!seenIds.has(sp.programId)) {
           seenIds.add(sp.programId);
-          allProgs.push({ programId: sp.programId, title: sp.title, duration: sp.duration || 0, updateTime: sp.updateTime || null });
+          allProgs.push(sp);
+          added++;
+          if (sp.programId === nextId) lastId = nextId;
         }
       }
+      // 如果sibling里没有nextId，单独抓
+      if (!seenIds.has(nextId)) {
+        const h3 = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + nextId + '/');
+        const pd3 = extractInitStores(h3);
+        if (pd3?.ProgramStore?.programInfo) {
+          const pi3 = pd3.ProgramStore.programInfo;
+          seenIds.add(nextId);
+          allProgs.push({ programId: nextId, title: pi3.title || '', duration: pi3.duration || 0, updateTime: pi3.updateTime || null });
+          lastId = nextId;
+          added++;
+        }
+      }
+      walked++;
+      if (walked % 50 === 0) {
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log('  Walk: ' + walked + ', total: ' + allProgs.length + ', next: ' + lastId + ', ' + elapsed + 's');
+      }
     } catch(e) {
-      console.log('  Walk stopped at ' + walked + ': ' + e.message);
+      console.log('  Walk stop: ' + walked + ' err: ' + e.message);
       break;
     }
-    if (walked % 50 === 0) console.log('  Walk: ' + walked + ', total: ' + allProgs.length);
-    execSync('sleep 0.15');
+    execSync('sleep 0.12');
   }
 
   console.log('Total: ' + allProgs.length + ' eps (walked ' + walked + ')');
   if (allProgs.length === 0) throw new Error('No episodes');
 
-  // Audio URLs
-  console.log('Fetching audio URLs...');
-  const audio = {};
-  let ok = 0, fail = 0;
-
-  for (let i = 0; i < allProgs.length; i++) {
-    const pid = allProgs[i].programId;
-    try {
-      const h2 = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + pid + '/');
-      const am = h2.match(/"audioUrl"\s*:\s*"([^"]+)"/);
-      if (am) {
-        const ep = am[1].replace(/\\u0026/g, '&');
-        try {
-          const h3 = await httpGet(ep);
-          const hm = h3.match(/href="([^"]+)"/);
-          audio[pid] = hm ? hm[1] : ep;
-        } catch(_) { audio[pid] = ep; }
-        ok++;
-      } else { fail++; }
-    } catch(_) { fail++; }
-    if ((i + 1) % 50 === 0 || i === allProgs.length - 1) {
-      const pct = ((i + 1) / allProgs.length * 100).toFixed(0);
-      const el = Math.round((Date.now() - startTime) / 1000);
-      console.log('  Audio: ' + (i+1) + '/' + allProgs.length + ' (' + pct + '%) OK=' + ok + ' FAIL=' + fail + ' ' + el + 's');
-    }
-    execSync('sleep 0.08');
-  }
-  console.log('Audio: ' + ok + ' OK, ' + fail + ' FAIL');
-
-  // RSS
+  // 3. 生成RSS（音频URL走CF Worker代理）
   const now = new Date().toUTCString();
   let items = '';
   for (const p of allProgs) {
     const pid = p.programId;
     if (!pid) continue;
-    const au = audio[pid] || WORKER_BASE + '/audio/' + CHANNEL_ID + '/' + pid;
+    const au = WORKER_BASE + '/audio/' + CHANNEL_ID + '/' + pid;
     items += '    <item>\n      <title>' + esc(p.title) + '</title>\n';
     items += '      <link>https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + pid + '/</link>\n';
     items += '      <guid isPermaLink="false">qtfm-' + CHANNEL_ID + '-' + pid + '</guid>\n';
@@ -239,9 +201,10 @@ async function main() {
     '    <itunes:category text="有声书"/>\n    <lastBuildDate>' + now + '</lastBuildDate>\n    <pubDate>' + now + '</pubDate>\n' +
     items + '  </channel>\n</rss>\n';
 
+  // 4. 写入文件
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(path.join(OUT_DIR, CHANNEL_ID + '.xml'), rss, 'utf8');
-  const meta = { channelId: CHANNEL_ID, title, programs: allProgs.length, audioOk: ok, audioFail: fail, generatedAt: now,
+  const meta = { channelId: CHANNEL_ID, title, programs: allProgs.length, generatedAt: now,
     duration: Math.round((Date.now() - startTime) / 1000) + 's' };
   fs.writeFileSync(path.join(OUT_DIR, CHANNEL_ID + '.json'), JSON.stringify(meta, null, 2), 'utf8');
 
@@ -251,7 +214,8 @@ async function main() {
   if (ex) Object.assign(ex, meta); else idx.push(meta);
   fs.writeFileSync(path.join(OUT_DIR, 'index.json'), JSON.stringify(idx, null, 2), 'utf8');
 
-  console.log('Done: ' + allProgs.length + ' eps, ' + (rss.length/1024).toFixed(0) + 'KB, ' + meta.duration);
+  const elapsed = Math.round((Date.now() - startTime) / 1000);
+  console.log('Done: ' + allProgs.length + ' eps, ' + (rss.length/1024).toFixed(0) + 'KB, ' + elapsed + 's');
 }
 
 main().catch(e => { console.error('FAIL:', e && (e.message || String(e)) || 'unknown'); process.exit(1); });
