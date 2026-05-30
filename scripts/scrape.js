@@ -30,35 +30,41 @@ function httpFetch(url, { json = true, retries = 3 } = {}) {
     const agent = u.protocol === 'https:' ? kaAgent : kaAgentHttp;
 
     function tryReq(n) {
-      const req = mod.get(u.href, {
-        agent, timeout: 30000,
-        headers: {
-          'User-Agent': UA,
-          'Accept': json ? 'application/json' : 'text/html',
-          'Accept-Encoding': 'gzip',
-          ...(json ? { 'Origin': 'https://m.qtfm.cn', 'Referer': 'https://m.qtfm.cn/' } : { 'Referer': 'https://m.qtfm.cn/' }),
-        },
-      }, (res) => {
-        const chunks = [];
-        const stream = res.headers['content-encoding'] === 'gzip'
-          ? res.pipe(zlib.createGunzip())
-          : res;
+      try {
+        const req = mod.get(u.href, {
+          agent, timeout: 30000,
+          headers: {
+            'User-Agent': UA,
+            'Accept': json ? 'application/json' : 'text/html',
+            'Accept-Encoding': 'gzip',
+            ...(json ? { 'Origin': 'https://m.qtfm.cn', 'Referer': 'https://m.qtfm.cn/' } : { 'Referer': 'https://m.qtfm.cn/' }),
+          },
+        }, (res) => {
+          const chunks = [];
+          const stream = res.headers['content-encoding'] === 'gzip'
+            ? res.pipe(zlib.createGunzip())
+            : res;
 
-        stream.on('data', c => chunks.push(c));
-        stream.on('end', () => {
-          const raw = Buffer.concat(chunks).toString('utf8');
-          if (res.statusCode >= 400) {
-            if (n > 1) return setTimeout(() => tryReq(n - 1), 2000);
-            return reject(new Error(`HTTP ${res.statusCode}`));
-          }
-          try { resolve(json ? JSON.parse(raw) : raw); }
-          catch (e) { reject(new Error(`parse: ${e.message.slice(0, 60)}`)); }
+          stream.on('data', c => chunks.push(c));
+          stream.on('end', () => {
+            const raw = Buffer.concat(chunks).toString('utf8');
+            if (res.statusCode >= 400) {
+              if (n > 1) return setTimeout(() => tryReq(n - 1), 2000);
+              return reject(new Error(`HTTP ${res.statusCode}`));
+            }
+            try { resolve(json ? JSON.parse(raw) : raw); }
+            catch (e) { reject(new Error(`parse: ${e.message.slice(0, 60)}`)); }
+          });
+          stream.on('error', e => { if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(e); });
         });
-        stream.on('error', e => { if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(e); });
-      });
-      req.on('error', e => { if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(e); });
-      req.on('timeout', () => { req.destroy(); if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(new Error('timeout')); });
-      req.end();
+        req.on('error', e => { if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(e); });
+        req.on('timeout', () => { req.destroy(); if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(new Error('timeout')); });
+        req.end();
+      } catch (e) {
+        // https.get()可能同步抛异常（如DNS AggregateError），走重试
+        if (n > 1) return setTimeout(() => tryReq(n - 1), 2000);
+        reject(new Error(`request: ${e.message?.slice(0, 60) || e}`));
+      }
     }
     tryReq(retries);
   });
@@ -431,4 +437,9 @@ async function main() {
   log(`DONE: ${programs.length} eps, ${isComplete ? 'COMPLETE' : 'ONGOING'} (${Math.round((Date.now() - T0) / 1000)}s)`);
 }
 
-main().catch(e => { console.error('FAIL:', e.message || String(e)); process.exit(1); });
+main().catch(e => {
+  const msg = e?.message || String(e || 'unknown');
+  const detail = e?.errors ? e.errors.map(x => x?.message || x).join('; ') : '';
+  console.error('FAIL:', msg + (detail ? ' | ' + detail : ''));
+  process.exit(1);
+});
