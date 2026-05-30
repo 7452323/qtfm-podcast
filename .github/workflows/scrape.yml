@@ -61,9 +61,9 @@ jobs:
           github_token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           publish_dir: ./novels
           publish_branch: gh-pages
-          force_orphan: true
-        env:
-          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+          keep_files: true
+          user_name: 'qtfm-bot'
+          user_email: 'bot@general74110.com'
 
       - name: notify worker
         if: ${{ success() && steps.params.outputs.channel_id != '' }}

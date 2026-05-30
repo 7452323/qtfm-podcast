@@ -215,7 +215,15 @@ async function fetchProgramsChain(seedBatch) {
 
 // ── 3. 排序去重 ──
 function sortDedup(programs) {
-  const ep = (t) => { const m = (t || '').match(/第(\d+)集/); return m ? parseInt(m[1]) : 999999; };
+  // 匹配 第X集、第X级、第X章、第X话，或者直接提取数字
+  const ep = (t) => {
+    if (!t) return 999999;
+    const m = t.match(/第(\d+)([集级章话期])/);
+    if (m) return parseInt(m[1]);
+    // 无编号的（片花/预告等）放最后
+    if (/片花|预告|花絮|彩蛋/i.test(t)) return 999999;
+    return 999999;
+  };
   programs.sort((a, b) => ep(a.title) - ep(b.title));
 
   const dedup = [];
