@@ -265,9 +265,16 @@ function detectCompletion(programs, channel) {
 // ── 5. 生成RSS ──
 function generateRSS(title, desc, cover, programs) {
   const now = new Date().toUTCString();
+  // 按节目编号排序后，用位置生成顺序日期（第1集最新，最后集最旧）
+  // 这样苹果播客按pubDate降序排列时，节目从第1集到最后一集正序播放
+  const startDate = new Date(); // 今天（第1集）
   const items = programs
     .filter(p => p.programId)
-    .map(p => `    <item>
+    .map((p, i) => {
+      // 从今天开始每天倒退一天
+      const d = new Date(startDate);
+      d.setDate(d.getDate() - i);
+      return `    <item>
       <title>${esc(p.title)}</title>
       <link>https://m.qtfm.cn/vchannels/${CID}/programs/${p.programId}/</link>
       <guid isPermaLink="false">qtfm-${CID}-${p.programId}</guid>
@@ -275,8 +282,9 @@ function generateRSS(title, desc, cover, programs) {
       <enclosure url="${esc(WORKER_BASE)}/audio/${CID}/${p.programId}" length="0" type="audio/mpeg"/>
       <itunes:duration>${fmtDur(p.duration)}</itunes:duration>
       <itunes:author>蜻蜓FM</itunes:author>
-      <pubDate>${p.updateTime ? new Date(p.updateTime).toUTCString() : now}</pubDate>
-    </item>`)
+      <pubDate>${d.toUTCString()}</pubDate>
+    </item>`;
+    })
     .join('\n');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
