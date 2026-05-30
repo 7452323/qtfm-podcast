@@ -209,6 +209,7 @@ async function handleTG(env, body, base) {
       '/status <频道ID> — 查看频道状态\n' +
       '/update <频道ID> — 更新指定频道\n' +
       '/updateall — 一键更新所有连载频道\n' +
+      '/clear [频道ID] — 清除全部/指定频道缓存\n' +
       '/list — 已抓取频道列表', env);
     return;
   }
@@ -387,6 +388,38 @@ async function handleTG(env, body, base) {
       msg += `\n<b>${c.title}</b> — ${c.programs || '?'}集\n${base}/${c.id}\n`;
     if (list.length > 15) msg += `\n...还有${list.length - 15}个`;
     await tgSendHTML(chatId, msg, env);
+    return;
+  }
+
+  // /clear [channelId] — 清除缓存
+  if (text.startsWith('/clear ') || text === '/clear') {
+    const target = text.replace('/clear', '').trim();
+    
+    if (!env?.QTFM_CACHE) {
+      await tgSendHTML(chatId, '❌ KV不可用', env);
+      return;
+    }
+
+    if (target) {
+      // 清除指定频道
+      await Promise.all([
+        env.QTFM_CACHE.delete('rss:' + target).catch(() => {}),
+        env.QTFM_CACHE.delete('meta:' + target).catch(() => {}),
+      ]);
+      await tgSendHTML(chatId, `🗑️ 已清除频道 ${target} 的缓存`, env);
+    } else {
+      // 清除所有缓存
+      const list = await env.QTFM_CACHE.list().catch(() => ({ keys: [] }));
+      const keys = list.keys || [];
+      if (!keys.length) {
+        await tgSendHTML(chatId, '📭 缓存为空，无需清除', env);
+        return;
+      }
+      // KV list() returns keys with name property
+      const deletePromises = keys.map(k => env.QTFM_CACHE.delete(k.name).catch(() => {}));
+      await Promise.allSettled(deletePromises);
+      await tgSendHTML(chatId, `🗑️ 已清除 ${keys.length} 个缓存项\n\n下次请求会重新拉取最新数据`, env);
+    }
     return;
   }
 
