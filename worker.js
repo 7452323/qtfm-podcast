@@ -457,10 +457,12 @@ async function syncFromGHPages(env) {
 
   const promises = [];
   for (const c of channels) {
+    // 自动判断完本：爬到的 >= 总数
+    const autoComplete = c.isComplete || (c.totalExpected > 0 && c.programs >= c.totalExpected);
     const meta = {
       channelId: c.channelId, title: c.title,
       programs: c.programs, totalExpected: c.totalExpected,
-      isComplete: c.isComplete,
+      isComplete: autoComplete,
       lastEpisodeId: c.lastEpisodeId,
       lastEpisodeTitle: c.lastEpisodeTitle,
       lastUpdateTime: c.lastUpdateTime,
