@@ -18,6 +18,36 @@ function tgSendHTML(chatId, text, env) {
   return tgSend(chatId, text, 'HTML', env).catch(() => tgSend(chatId, text, null, env));
 }
 
+// ── 触发更新（抽取成公共函数） ──
+async function triggerUpdate(env, chatId, cid, base) {
+  await tgSendHTML(chatId, `🔄 触发更新频道 ${cid}...`, env);
+  try {
+    const r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
+      method: 'POST',
+      headers: {
+        'User-Agent': 'qtfm-worker',
+        Authorization: `Bearer ${env.GH_TOKEN}`,
+        Accept: 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        event_type: 'scrape',
+        client_payload: {
+          channel_id: cid,
+          title: '',
+          worker_base: base,
+          action_type: 'update',
+        },
+      }),
+    });
+    await tgSendHTML(chatId, r.ok || r.status === 204
+      ? `✅ 更新已触发，约5-15分钟完成\n📖 ${PAGE_BASE}/${cid}.xml`
+      : `❌ HTTP ${r.status}`, env);
+  } catch (e) {
+    await tgSendHTML(chatId, `❌ ${e.message}`, env);
+  }
+}
+
 // ── HTTP ──
 async function fetchJSON(url) {
   const r = await fetch(url, {
@@ -177,7 +207,8 @@ async function handleTG(env, body, base) {
       '🎧 蜻蜓FM播客机器人 v2\n\n' +
       '/novel 小说名 — 搜索并抓取\n' +
       '/status <频道ID> — 查看频道状态\n' +
-      '/update <频道ID> — 强制更新\n' +
+      '/update <频道ID> — 更新指定频道\n' +
+      '/updateall — 一键更新所有连载频道\n' +
       '/list — 已抓取频道列表', env);
     return;
   }
@@ -222,37 +253,109 @@ async function handleTG(env, body, base) {
     return;
   }
 
-  // /update <channelId>
-  if (text.startsWith('/update')) {
-    const cid = text.replace('/update', '').trim();
+  // /update <channelId> — 更新指定频道
+  if (text.startsWith('/update ')) {
+    const cid = text.replace('/update ', '').trim();
     if (!cid) { await tgSendHTML(chatId, '用法: /update 频道ID', env); return; }
+    await triggerUpdate(env, chatId, cid, base);
+    return;
+  }
 
-    await tgSendHTML(chatId, `🔄 触发更新频道 ${cid}...`, env);
-    try {
-      const r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
-        method: 'POST',
-        headers: {
-          'User-Agent': 'qtfm-worker',
-          Authorization: `Bearer ${env.GH_TOKEN}`,
-          Accept: 'application/vnd.github.v3+json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          event_type: 'scrape',
-          client_payload: {
-            channel_id: cid,
-            title: '',
-            worker_base: base,
-            action_type: 'update',
-          },
-        }),
-      });
-      await tgSendHTML(chatId, r.ok || r.status === 204
-        ? `✅ 更新已触发，约5-15分钟完成\n📖 ${PAGE_BASE}/${cid}.xml`
-        : `❌ HTTP ${r.status}`, env);
-    } catch (e) {
-      await tgSendHTML(chatId, `❌ ${e.message}`, env);
+  // /updateall 或 /refresh — 一键更新所有连载频道
+  if (text === '/updateall' || text === '/refresh' || text === '/update all') {
+    await tgSendHTML(chatId, '🔍 查找连载频道...', env);
+    
+    let ongoingChannels = [];
+    
+    // 从KV获取
+    const raw = await env?.QTFM_CACHE?.get('active_channels', { type: 'text' }).catch(() => null);
+    if (raw) {
+      const list = JSON.parse(raw);
+      for (const c of list) {
+        const meta = await env?.QTFM_CACHE?.get('meta:' + c.id, { type: 'text' }).catch(() => null);
+        if (meta) {
+          const m = JSON.parse(meta);
+          if (!m.isComplete) ongoingChannels.push(m);
+        }
+      }
     }
+    
+    // KV不够就从GH Pages拉
+    if (!ongoingChannels.length) {
+      try {
+        const r = await fetch(`${PAGE_BASE}/state.json`, { signal: AbortSignal.timeout(5000) });
+        if (r.ok) {
+          const state = await r.json();
+          for (const [cid, s] of Object.entries(state)) {
+            if (!s.isComplete) {
+              ongoingChannels.push({ channelId: cid, title: s.title || cid, programs: s.totalPrograms || 0 });
+            }
+          }
+        } else {
+          // 回退到index.json
+          const r2 = await fetch(`${PAGE_BASE}/index.json`, { signal: AbortSignal.timeout(5000) });
+          if (r2.ok) {
+            const list = await r2.json();
+            for (const c of list) {
+              if (!c.isComplete) {
+                ongoingChannels.push({ channelId: c.channelId, title: c.title || c.channelId, programs: c.programs || 0 });
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    
+    if (!ongoingChannels.length) {
+      await tgSendHTML(chatId, '✅ 没有连载中的频道需要更新', env);
+      return;
+    }
+    
+    const total = ongoingChannels.length;
+    await tgSendHTML(chatId, `🔄 找到 ${total} 个连载频道，开始触发更新...`, env);
+    
+    let success = 0, failed = 0;
+    const limit = Math.min(total, 10); // 一次最多10个
+    const channels = ongoingChannels.slice(0, limit);
+    
+    for (let i = 0; i < channels.length; i++) {
+      const c = channels[i];
+      try {
+        const r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
+          method: 'POST',
+          headers: {
+            'User-Agent': 'qtfm-worker',
+            Authorization: `Bearer ${env.GH_TOKEN}`,
+            Accept: 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            event_type: 'scrape',
+            client_payload: {
+              channel_id: c.channelId,
+              title: c.title,
+              worker_base: base,
+              action_type: 'update',
+            },
+          }),
+        });
+        if (r.ok || r.status === 204) {
+          success++;
+        } else {
+          failed++;
+        }
+      } catch (e) {
+        failed++;
+      }
+      // 每触发一个等500ms，避免限频
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+    let msg = `✅ 触发完成: ${success} 成功`;
+    if (failed) msg += `, ${failed} 失败`;
+    if (total > limit) msg += `\n💡 还有 ${total - limit} 个没触发（单次上限10个）`;
+    msg += `\n\n⏳ 每个约5-30分钟完成，完成后会通知你`;
+    await tgSendHTML(chatId, msg, env);
     return;
   }
 
@@ -284,6 +387,13 @@ async function handleTG(env, body, base) {
       msg += `\n<b>${c.title}</b> — ${c.programs || '?'}集\n${base}/${c.id}\n`;
     if (list.length > 15) msg += `\n...还有${list.length - 15}个`;
     await tgSendHTML(chatId, msg, env);
+    return;
+  }
+
+  // /update（无参数时也当updateall）
+  if (text === '/update') {
+    // 等同于 /updateall
+    await tgSendHTML(chatId, '用法: /update 频道ID  或  /updateall 更新所有连载', env);
     return;
   }
 
