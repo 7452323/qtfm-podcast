@@ -11,7 +11,7 @@ const zlib = require('zlib');
 const CID = process.env.CHANNEL_ID;
 if (!CID) { console.error('CHANNEL_ID required'); process.exit(1); }
 
-const WORKER_BASE = process.env.WORKER_BASE || 'https://qtfm-podcast.general74110.workers.dev';
+const WORKER_BASE = process.env.WORKER_BASE || 'https://qtfm-podcast.7452323.workers.dev';
 const OUT_DIR = process.env.OUT_DIR || 'novels';
 const UA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36';
 
@@ -308,7 +308,7 @@ ${items}
 // ── 6. 从gh-pages读取旧状态 ──
 async function fetchExistingState() {
   try {
-    const r = await fetch(`https://general74110.github.io/qtfm-podcast/state.json`, { signal: AbortSignal.timeout(5000) });
+    const r = await fetch(`https://7452323.github.io/qtfm-podcast/state.json`, { signal: AbortSignal.timeout(5000) });
     if (r.ok) {
       const state = await r.json();
       return state[CID] || null;
@@ -326,7 +326,7 @@ async function incrementalUpdate(existingState, programs) {
   const existingIds = new Set();
   // 从已有RSS中恢复已爬的programId
   try {
-    const r = await fetch(`https://general74110.github.io/qtfm-podcast/${CID}.json`, { signal: AbortSignal.timeout(5000) });
+    const r = await fetch(`https://7452323.github.io/qtfm-podcast/${CID}.json`, { signal: AbortSignal.timeout(5000) });
     if (r.ok) {
       // 直接从state里拿
     }
